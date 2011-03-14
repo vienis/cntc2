@@ -1,0 +1,215 @@
+From 24ddc9f6ba07bcc25ce6ac1f7ef89955a518df83 Mon Sep 17 00:00:00 2001
+From: fine <fine224@gmail.com>
+Date: Mon, 14 Mar 2011 23:42:48 +0800
+Subject: [PATCH] Auto Broadcast v2
+
+Signed-off-by: fine <fine224@gmail.com>
+---
+ sql/Autobroadcast/mangos_autobroadcast.sql |    6 +++
+ sql/Autobroadcast/mangos_string.sql        |    2 +
+ src/game/Language.h                        |    3 +-
+ src/game/World.cpp                         |   66 ++++++++++++++++++++++++++++
+ src/game/World.h                           |    4 +-
+ src/mangosd/mangosd.conf.dist.in           |   23 ++++++++++
+ 6 files changed, 102 insertions(+), 2 deletions(-)
+ create mode 100644 sql/Autobroadcast/mangos_autobroadcast.sql
+ create mode 100644 sql/Autobroadcast/mangos_string.sql
+
+diff --git a/sql/Autobroadcast/mangos_autobroadcast.sql b/sql/Autobroadcast/mangos_autobroadcast.sql
+new file mode 100644
+index 0000000..d396083
+--- /dev/null
++++ b/sql/Autobroadcast/mangos_autobroadcast.sql
+@@ -0,0 +1,6 @@
++CREATE TABLE IF NOT EXISTS `autobroadcast` (
++  `id` int(11) NOT NULL auto_increment,
++  `text` longtext NOT NULL,
++  `next` int(11) NOT NULL,
++  PRIMARY KEY  (`id`)
++) ENGINE=MyISAM  DEFAULT CHARSET=utf8 ;
+\ No newline at end of file
+diff --git a/sql/Autobroadcast/mangos_string.sql b/sql/Autobroadcast/mangos_string.sql
+new file mode 100644
+index 0000000..0c57350
+--- /dev/null
++++ b/sql/Autobroadcast/mangos_string.sql
+@@ -0,0 +1,2 @@
++INSERT INTO `mangos_string` (`entry`, `content_default`, `content_loc1`, `content_loc2`, `content_loc3`, `content_loc4`, `content_loc5`, `content_loc6`, `content_loc7`, `content_loc8`) VALUES
++(11000, '|cffffcc00[Server]: |cff00ff00%s|r', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+\ No newline at end of file
+diff --git a/src/game/Language.h b/src/game/Language.h
+index b4f6f47..d1400d1 100644
+--- a/src/game/Language.h
++++ b/src/game/Language.h
+@@ -943,7 +943,8 @@ enum MangosStrings
+     //                                    10000-10999
+ 
+     // Use for custom patches             11000-11999
+-
++    // Broadcaster
++    LANG_AUTO_BROADCAST                 = 11000,
+     // NOT RESERVED IDS                   12000-1999999999
+     // `db_script_string` table index     2000000000-2000009999 (MIN_DB_SCRIPT_STRING_ID-MAX_DB_SCRIPT_STRING_ID)
+     // For other tables maybe             2000010000-2147483647 (max index)
+diff --git a/src/game/World.cpp b/src/game/World.cpp
+index 32f890b..0b3577e 100644
+--- a/src/game/World.cpp
++++ b/src/game/World.cpp
+@@ -62,6 +62,7 @@
+ #include "GMTicketMgr.h"
+ #include "Util.h"
+ #include "CharacterDatabaseCleaner.h"
++#include "Language.h"
+ 
+ INSTANTIATE_SINGLETON_1( World );
+ 
+@@ -1295,6 +1296,9 @@ void World::SetInitialWorldSettings()
+     LoginDatabase.PExecute("INSERT INTO uptime (realmid, starttime, startstring, uptime) VALUES('%u', " UI64FMTD ", '%s', 0)",
+         realmID, uint64(m_startTime), isoDate);
+ 
++    static uint32 abtimer = 0;
++    abtimer = sConfig.GetIntDefault("AutoBroadcast.Timer", 60000);
++
+     m_timers[WUPDATE_OBJECTS].SetInterval(0);
+     m_timers[WUPDATE_SESSIONS].SetInterval(0);
+     m_timers[WUPDATE_WEATHERS].SetInterval(1*IN_MILLISECONDS);
+@@ -1303,6 +1307,7 @@ void World::SetInitialWorldSettings()
+                                                             //Update "uptime" table based on configuration entry in minutes.
+     m_timers[WUPDATE_CORPSES].SetInterval(20*MINUTE*IN_MILLISECONDS);
+     m_timers[WUPDATE_DELETECHARS].SetInterval(DAY*IN_MILLISECONDS); // check for chars to delete every day
++    m_timers[WUPDATE_AUTOBROADCAST].SetInterval(abtimer);
+ 
+     //to set mailtimer to return mails every day between 4 and 5 am
+     //mailtimer is increased when updating auctions
+@@ -1519,6 +1524,17 @@ void World::Update(uint32 diff)
+         m_timers[WUPDATE_EVENTS].SetInterval(nextGameEvent);
+         m_timers[WUPDATE_EVENTS].Reset();
+     }
++	
++	static uint32 autobroadcaston = 0;
++    autobroadcaston = sConfig.GetIntDefault("AutoBroadcast.On", 0);
++    if(autobroadcaston == 1)
++    {
++        if (m_timers[WUPDATE_AUTOBROADCAST].Passed())
++        {
++            m_timers[WUPDATE_AUTOBROADCAST].Reset();
++            SendBroadcast();
++        }
++    }
+ 
+     /// </ul>
+     ///- Move all creatures with "delayed move" and remove and delete all objects with "delayed remove"
+@@ -1937,6 +1953,56 @@ void World::ProcessCliCommands()
+     }
+ }
+ 
++void World::SendBroadcast()
++{
++    std::string msg;
++    static int nextid;
++
++    QueryResult *result;
++    if(nextid != 0)
++    {
++        result = WorldDatabase.PQuery("SELECT `text`, `next` FROM `autobroadcast` WHERE `id` = %u", nextid);
++    }
++    else
++    {
++        result = WorldDatabase.PQuery("SELECT `text`, `next` FROM `autobroadcast` ORDER BY RAND() LIMIT 1");
++    }
++
++    if(!result)
++        return;
++
++    nextid = result->Fetch()[1].GetUInt8();
++    msg = result->Fetch()[0].GetString();
++    delete result;
++
++    static uint32 abcenter = 0;
++    abcenter = sConfig.GetIntDefault("AutoBroadcast.Center", 0);
++    if(abcenter == 0)
++    {
++        sWorld.SendWorldText(LANG_AUTO_BROADCAST, msg.c_str());
++
++        sLog.outString("AutoBroadcast: '%s'",msg.c_str());
++    }
++    if(abcenter == 1)
++    {
++        WorldPacket data(SMSG_NOTIFICATION, (msg.size()+1));
++        data << msg;
++        sWorld.SendGlobalMessage(&data);
++
++        sLog.outString("AutoBroadcast: '%s'",msg.c_str());
++    }
++    if(abcenter == 2)
++    {
++        sWorld.SendWorldText(LANG_AUTO_BROADCAST, msg.c_str());
++
++        WorldPacket data(SMSG_NOTIFICATION, (msg.size()+1));
++        data << msg;
++        sWorld.SendGlobalMessage(&data);
++
++        sLog.outString("AutoBroadcast: '%s'",msg.c_str());
++    }
++}
++
+ void World::InitResultQueue()
+ {
+ }
+diff --git a/src/game/World.h b/src/game/World.h
+index f486fb9..40e73df 100644
+--- a/src/game/World.h
++++ b/src/game/World.h
+@@ -82,7 +82,8 @@ enum WorldTimers
+     WUPDATE_CORPSES     = 5,
+     WUPDATE_EVENTS      = 6,
+     WUPDATE_DELETECHARS = 7,
+-    WUPDATE_COUNT       = 8
++    WUPDATE_AUTOBROADCAST = 8,
++    WUPDATE_COUNT         = 9
+ };
+ 
+ /// Configuration elements
+@@ -438,6 +439,7 @@ class World
+ 
+         WorldSession* FindSession(uint32 id) const;
+         void AddSession(WorldSession *s);
++        void SendBroadcast();
+         bool RemoveSession(uint32 id);
+         /// Get the number of current active sessions
+         void UpdateMaxSessionCounters();
+diff --git a/src/mangosd/mangosd.conf.dist.in b/src/mangosd/mangosd.conf.dist.in
+index 61ffd07..226f184 100644
+--- a/src/mangosd/mangosd.conf.dist.in
++++ b/src/mangosd/mangosd.conf.dist.in
+@@ -1607,3 +1607,26 @@ SOAP.Port = 7878
+ CharDelete.Method = 0
+ CharDelete.MinLevel = 0
+ CharDelete.KeepDays = 30
++
++###################################################################################################################
++# AUTO BROADCAST
++#
++#    AutoBroadcast.On
++#        Enable auto broadcast
++#        Default: 0 - off
++#                 1 - on
++#
++#    AutoBroadcast.Center
++#        Display method
++#        Default: 0 - announce
++#                 1 - notify
++#                 2 - both
++#
++#    AutoBroadcast.Timer
++#        Timer for auto broadcast
++#
++###################################################################################################################
++
++AutoBroadcast.On = 1
++AutoBroadcast.Center = 2
++AutoBroadcast.Timer = 60000
+\ No newline at end of file
+-- 
+1.7.4.msysgit.0
+
